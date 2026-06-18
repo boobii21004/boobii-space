@@ -4,7 +4,13 @@ const { JSDOM } = require('jsdom');
 const cors = require('cors');
 
 const app = express();
+// 1. 優先讀取 Render 的環境變數 PORT，如果沒有（例如在本地電腦）才用 3000
 const PORT = process.env.PORT || 3000;
+
+// 2. 讓伺服器監聽這個 PORT，並綁定到 '0.0.0.0'（這點在某些雲端環境很重要）
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on port ${PORT}`);
+});
 
 // 讓前端網頁可以順利跟後端通訊 (解決跨網域問題)
 app.use(cors());
