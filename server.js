@@ -1,3 +1,91 @@
+// 💡 在 server.js 開頭引入
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+app.post('/download', async (req, res) => {
+    const targetUrl = req.body.url;
+    if (!targetUrl) return res.status(400).json({ error: '未提供網址' });
+
+    let isClientConnected = true;
+    res.on('close', () => {
+        console.log('🛑 用戶端中斷連線');
+        isClientConnected = false;
+    });
+
+    try {
+        // === 【步驟 A：解析目錄】 ===
+        const mainResponse = await axios.get(targetUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const mainDom = new JSDOM(mainResponse.data);
+        const doc = mainDom.window.document;
+        const links = doc.querySelectorAll('.chapter-list li a');
+        
+        let chapters = [];
+        links.forEach(link => {
+            const href = link.getAttribute('href')?.trim() || '';
+            const text = link.textContent?.trim() || '';
+            if (href && text && !href.includes('javascript:') && !text.includes('首頁')) {
+                chapters.push({ title: text, url: href.startsWith('http') ? href : new URL(href, targetUrl).href });
+            }
+        });
+
+        if (chapters.length === 0) return res.status(404).json({ error: '找不到章節' });
+
+        // 設定串流 Headers
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="novel.txt"');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.write(`=== 小說打包開始 (共 ${chapters.length} 章) ===\n\n`);
+
+        // === 【步驟 B：小批次並行爬取（優化核心）】 ===
+        // 以前是一章一章等（1.5秒），現在改為「一次同時抓 3 章」，抓完再集體休息 2 秒。
+        // 這樣既能保持對小說網站的禮貌，又能釋放 Node.js 的排隊壓力！
+        const BATCH_SIZE = 3; 
+
+        for (let i = 0; i < chapters.length; i += BATCH_SIZE) {
+            if (!isClientConnected) break;
+
+            // 切出這一批次要抓的章節（例如第 1, 2, 3 章）
+            const batch = chapters.slice(i, i + BATCH_SIZE);
+            
+            // 同時發送這一組的請求
+            const batchPromises = batch.map(async (ch, index) => {
+                const globalIndex = i + index + 1;
+                console.log(`📥 正在下載 (${globalIndex}/${chapters.length}): ${ch.title}`);
+                try {
+                    const chResponse = await axios.get(ch.url, {
+                        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+                    });
+                    const chDom = new JSDOM(chResponse.data);
+                    const content = chDom.window.document.querySelector('.chapter-detail .content')?.textContent.trim() || '找不到內文';
+                    return `\n\n=== ${ch.title} ===\n\n${content}\n`;
+                } catch (err) {
+                    return `\n\n=== ${ch.title} ===\n\n[下載失敗: ${err.message}]\n`;
+                }
+            });
+
+            // 等這一批（3章）都抓完
+            const results = await Promise.all(batchPromises);
+            
+            // 寫入前端（前端進度條會一次跳 3 章，體驗很流暢）
+            results.forEach(text => res.write(text));
+
+            // 批次間的安全間隔，防禦小說網站封鎖
+            await delay(2000); 
+        }
+
+        if (isClientConnected) {
+            res.write(`\n\n=== 全書打包完成 ===\n`);
+            res.end();
+        }
+
+    } catch (error) {
+        console.error(error);
+        if (!res.headersSent) res.status(500).json({ error: error.message });
+        else res.end();
+    }
+});
+
 const express = require('express');
 const axios = require('axios');
 const { JSDOM } = require('jsdom');
