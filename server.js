@@ -3,7 +3,7 @@ const axios = require('axios');
 const { JSDOM } = require('jsdom');
 const cors = require('cors');
 
-// 全域的延遲工具函式（放在最開頭）
+// 全域延遲工具函式
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
@@ -21,12 +21,12 @@ app.post('/download', async (req, res) => {
 
     let isClientConnected = true;
     res.on('close', () => {
-        console.log('🛑 用戶端中斷連線（可能按了停止、關閉網頁或完成該卷下載）');
+        console.log('🛑 用戶端連線結束（可能完成了該卷下載、按了停止或關閉網頁）');
         isClientConnected = false;
     });
 
     try {
-        // === 【步驟 A：解析目錄】 ===
+        // === 【步驟 A：解析目錄與書名】 ===
         const mainResponse = await axios.get(targetUrl, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
         });
@@ -65,37 +65,47 @@ app.post('/download', async (req, res) => {
             res.write(`=== 續傳打包開始 (自第 ${startIndex + 1} 章起) ===\n\n`);
         }
 
-        // === 【步驟 B：5章一組並行 + 400章自動截斷】 ===
-        const BATCH_SIZE = 5; 
+        // === 【步驟 B：1.5秒乖寶寶排隊 + 400章自動截斷】 ===
         const MAX_CHAPTERS_PER_REQUEST = 400; // 每接力一次最多抓 400 章
         const endIndex = Math.min(startIndex + MAX_CHAPTERS_PER_REQUEST, chapters.length);
 
-        for (let i = startIndex; i < endIndex; i += BATCH_SIZE) {
+        for (let i = startIndex; i < endIndex; i++) {
             if (!isClientConnected) break;
 
-            const batch = chapters.slice(i, Math.min(i + BATCH_SIZE, endIndex));
-            
-            const batchPromises = batch.map(async (ch, index) => {
-                const globalIndex = i + index + 1;
-                console.log(`📥 正在下載 (${globalIndex}/${chapters.length}): ${ch.title}`);
-                try {
-                    const chResponse = await axios.get(ch.url, {
-                        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-                        timeout: 8000 // 8秒超時防線
-                    });
-                    const chDom = new JSDOM(chResponse.data);
-                    const content = chDom.window.document.querySelector('.chapter-detail .content')?.textContent.trim() || '找不到內文';
-                    return `\n\n=== ${ch.title} ===\n\n${content}\n`;
-                } catch (err) {
-                    console.log(`❌ 第 ${globalIndex} 章抓取失敗: ${err.message}`);
-                    return `\n\n=== ${ch.title} ===\n\n[下載失敗: ${err.message}]\n`;
+            const ch = chapters[i];
+            const globalIndex = i + 1;
+            console.log(`📥 正在下載 (${globalIndex}/${chapters.length}): ${ch.title}`);
+
+            try {
+                const chResponse = await axios.get(ch.url, {
+                    headers: { 
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+                    },
+                    timeout: 8000 // 8秒超時防線
+                });
+                
+                const chDom = new JSDOM(chResponse.data);
+                const content = chDom.window.document.querySelector('.chapter-detail .content')?.textContent.trim() || '找不到內文';
+                
+                // 成功抓到，寫入串流
+                res.write(`\n\n=== ${ch.title} ===\n\n${content}\n`);
+
+            } catch (err) {
+                console.log(`❌ 第 ${globalIndex} 章抓取失敗: ${err.message}`);
+                res.write(`\n\n=== ${ch.title} ===\n\n[下載失敗: ${err.message}]\n`);
+                
+                // 防禦 429 速率限制
+                if (err.response && err.response.status === 429) {
+                    console.log('⚠️ 偵測到 429 封鎖！緊急延長休息時間 5 秒...');
+                    await delay(5000);
+                    continue;
                 }
-            });
+            }
 
-            const results = await Promise.all(batchPromises);
-            results.forEach(text => res.write(text));
-
-            await delay(2500); 
+            // 1.5 秒安全間隔，溫和爬取不觸發防火牆
+            await delay(1500); 
         }
 
         // === 【步驟 C：判定是整本結束，還是需要繼續接力】 ===
@@ -116,7 +126,7 @@ app.post('/download', async (req, res) => {
     }
 });
 
-// 監聽連接埠（預設 3000 或 Render 提供 Windows/Linux 的 PORT）
+// 監聽連接埠
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 伺服器已成功啟動在 port ${PORT}`);

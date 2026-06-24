@@ -144,7 +144,7 @@
 
     <div class="container">
         <h1>小說狂人 txt 打包機器人</h1>
-        <div class="description">分卷自動接力版：每 400 章自動存一個檔並續傳，再也不怕 Render 斷線！</div>
+        <div class="description">分卷自動接力版：每 400 章自動存一個檔並續傳，安全對抗 Render 與防護網限制！</div>
 
         <div class="form-group">
             <label for="novelUrl">小說目錄網址：</label>
@@ -166,7 +166,7 @@
         const statusBox = document.getElementById('statusBox');
 
         let abortController = null; 
-        let userStopped = false; // 用來標記使用者是否主動按停止
+        let userStopped = false; 
 
         startBtn.addEventListener('click', async () => {
             const url = novelUrlInput.value.trim();
@@ -175,31 +175,27 @@
                 return;
             }
 
-            // 初始化狀態
             startBtn.disabled = true;
             stopBtn.style.display = 'block';
             userStopped = false;
 
-            let currentStartIndex = 0; // 從第 0 章開始抓
+            let currentStartIndex = 0; 
             let loopCount = 1;
 
             try {
-                // 用 while 迴圈跑「自動接力」
+                // 自動續傳接力迴圈
                 while (currentStartIndex !== null && !userStopped) {
                     abortController = new AbortController();
                     showStatus(`🔄 [第 ${loopCount} 卷] 正在連接伺服器並解析進度...`, 'loading');
                     
-                    // 呼叫單卷下載函式，並等待它完成
                     const nextIndex = await downloadPart(url, currentStartIndex);
                     
-                    // 如果下載函式回傳了下一個章節的索引，代表需要接力
                     if (nextIndex && nextIndex > currentStartIndex) {
                         currentStartIndex = nextIndex;
                         loopCount++;
-                        // 稍微喘息 3 秒再發動下一次續傳，保護伺服器
+                        // 兩卷之間主動喘息 3 秒
                         await new Promise(r => setTimeout(r, 3000)); 
                     } else {
-                        // 回傳 null 代表全書通通下載完了
                         currentStartIndex = null; 
                     }
                 }
@@ -214,7 +210,7 @@
             }
         });
 
-        // 💡 核心：單卷下載處理函式
+        // 處理單卷下載
         async function downloadPart(url, startIndex) {
             const backendUrl = 'https://my-novel-packer.onrender.com/download';
 
@@ -245,13 +241,13 @@
                 const textChunk = decoder.decode(value, { stream: true });
                 receivedText += textChunk;
 
-                // 解析總章節數
+                // 解析總章節
                 if (totalChapters === 0) {
                     const totalMatch = receivedText.match(/共\s*(\d+)\s*章/);
                     if (totalMatch) totalChapters = parseInt(totalMatch[1], 10);
                 }
 
-                // 解析當前打包章節
+                // 解析當前標題
                 const chapterMatches = [...receivedText.matchAll(/===\s*([^\n=]+)\s*===/g)];
                 if (chapterMatches.length > 0) {
                     const lastMatch = chapterMatches[chapterMatches.length - 1][1];
@@ -260,12 +256,12 @@
                     }
                 }
 
-                // 計算目前進度數
+                // 計算當前累計進度
                 const currentChapterCount = chapterMatches.filter(m => 
                     !m[1].includes('打包開始') && 
                     !m[1].includes('打包結束') && 
                     !m[1].includes('全書打包完成')
-                ).length + startIndex; // 加上先前的起始章節數，進度才會累積
+                ).length + startIndex; 
 
                 let progressText = `📥 正在下載各章節，請稍候...\n`;
                 if (totalChapters > 0) {
@@ -278,10 +274,8 @@
                 showStatus(progressText, 'loading');
             }
 
-            // --- 串流讀取完畢，開始處理存檔與分析是否續傳 ---
+            // 處理存檔
             const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
-
-            // 讀取後端給的檔名
             const disposition = response.headers.get('Content-Disposition');
             let filename = `novel_part.txt`;
             if (disposition) {
@@ -295,7 +289,6 @@
                 }
             }
 
-            // 觸發下載
             const downloadUrl = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = downloadUrl;
@@ -305,11 +298,11 @@
             document.body.removeChild(a);
             window.URL.revokeObjectURL(downloadUrl);
 
-            // 💡 檢查文字緩衝區，看有沒有續傳暗號
+            // 檢查是否需要自動續傳
             const nextMatch = receivedText.match(/=== 本卷打包結束，請自動續傳，下一章索引:(\d+) ===/);
             if (nextMatch) {
                 const nextIndex = parseInt(nextMatch[1], 10);
-                return nextIndex; // 回傳下一個起點，讓外面的 while 迴圈繼續跑
+                return nextIndex; 
             }
 
             if (receivedText.includes('=== 全書打包完成 ===')) {
@@ -318,10 +311,9 @@
                 showStatus('⚠️ 下載意外中斷，已為您保存目前下載的章節。', 'error');
             }
             
-            return null; // 結束續傳
+            return null; 
         }
 
-        // 停止按鈕
         stopBtn.addEventListener('click', () => {
             userStopped = true;
             if (abortController) {
