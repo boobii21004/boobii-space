@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>小說狂人 txt 打包機器人 (網頁版)</title>
     <style>
-        /* 基礎美化，讓畫面在手機上看起來像一個質感的 App */
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: #f4f6f9;
@@ -25,7 +24,7 @@
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
             padding: 30px;
             width: 100%;
-            max-width: 480px; /* 限制最大寬度，在電腦上也不會太寬 */
+            max-width: 480px;
             box-sizing: border-box;
         }
 
@@ -55,13 +54,12 @@
             color: #34495e;
         }
 
-        /* 貼入網址的輸入框 */
         input[type="url"] {
             width: 100%;
             padding: 12px;
             border: 2px solid #bdc3c7;
             border-radius: 6px;
-            font-size: 16px; /* 設為 16px 可以防止 iOS 點擊時畫面強制放大 */
+            font-size: 16px;
             box-sizing: border-box;
             transition: border-color 0.3s;
         }
@@ -71,11 +69,15 @@
             outline: none;
         }
 
-        /* 送出按鈕 */
+        /* 按鈕群組 */
+        .btn-group {
+            display: flex;
+            gap: 10px;
+        }
+
         button {
-            width: 100%;
+            flex: 1;
             padding: 14px;
-            background-color: #3498db;
             color: white;
             border: none;
             border-radius: 6px;
@@ -85,23 +87,38 @@
             transition: background-color 0.2s;
         }
 
-        button:hover {
+        #startBtn {
+            background-color: #3498db;
+        }
+
+        #startBtn:hover {
             background-color: #2980b9;
         }
 
-        button:disabled {
+        #startBtn:disabled {
             background-color: #95a5a6;
             cursor: not-allowed;
         }
 
-        /* 狀態提示區域（例如：下載中、成功、失敗） */
+        /* 停止按鈕樣式 */
+        #stopBtn {
+            background-color: #e74c3c;
+            display: none; /* 預設隱藏，開始下載才顯示 */
+        }
+
+        #stopBtn:hover {
+            background-color: #c0392b;
+        }
+
+        /* 狀態提示區域 */
         .status-message {
             margin-top: 20px;
             padding: 12px;
             border-radius: 6px;
             text-align: center;
             font-size: 14px;
-            display: none; /* 預設隱藏 */
+            display: none;
+            white-space: pre-line; /* 支援換行顯示進度 */
         }
 
         .status-loading {
@@ -137,89 +154,167 @@
             <input type="url" id="novelUrl" placeholder="https://czbooks.net/n/..." required>
         </div>
 
-        <button id="startBtn">開始打包並下載</button>
+        <div class="btn-group">
+            <button id="startBtn">開始打包並下載</button>
+            <button id="stopBtn">停止下載</button>
+        </div>
 
         <div id="statusBox" class="status-message"></div>
     </div>
 
     <script>
         const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const novelUrlInput = document.getElementById('novelUrl');
         const statusBox = document.getElementById('statusBox');
+
+        let abortController = null; // 用來控制中斷連線的控制器
 
         startBtn.addEventListener('click', async () => {
             const url = novelUrlInput.value.trim();
 
-            // 簡單驗證有沒有輸入網址
             if (!url) {
                 showStatus('請先輸入網址！', 'error');
                 return;
             }
 
-            // 變更 UI 狀態為下載中，並停用按鈕防止重複點擊
-            showStatus('正在解析目錄並下載各章節，請稍候... (這可能需要一點時間)', 'loading');
+            // 初始化中斷控制器
+            abortController = new AbortController();
+
+            showStatus('正在連接伺服器並解析目錄，請稍候...', 'loading');
             startBtn.disabled = true;
+            stopBtn.style.display = 'block'; // 顯示停止按鈕
 
             try {
-                // 【注意】這裡的網址之後會改成我們部署上線後的後端伺服器網址
-                // 目前先暫定發送給本地測試伺服器
                 const backendUrl = 'https://my-novel-packer.onrender.com/download';
 
-                // 發送請求給後端
+                // 發送請求，並帶入 abortController 的 signal
                 const response = await fetch(backendUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ url: url })
+                    body: JSON.stringify({ url: url }),
+                    signal: abortController.signal
                 });
 
                 if (!response.ok) {
-                    throw new Error('伺服器處理失敗，請確認網址是否正確。');
+                    throw new Error(`伺服器回應錯誤 (狀態碼: ${response.status})`);
                 }
 
-                // 接收後端傳回的檔案流（Blob）
-                const blob = await response.blob();
+                // 核心：讀取 Response 的 Stream 串流核心
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
                 
-                // 從後端的回應標頭（Headers）中試圖取得檔名，若沒有就用預設檔名
+                let chunks = []; // 用來收集所有下載下來的二進位資料塊
+                let receivedText = ''; // 用來即時分析進度用的文字緩衝區
+                
+                let totalChapters = 0;
+                let currentChapterTitle = '準備中...';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        break; // 串流結束，跳出迴圈
+                    }
+
+                    chunks.push(value); // 儲存資料片段，最後用來做成檔案
+                    
+                    // 將新收到的二進位片段解碼為文字，用來分析進度
+                    const textChunk = decoder.decode(value, { stream: true });
+                    receivedText += textChunk;
+
+                    // 1. 解析總章節數（從後端寫入的開頭訊息中尋找）
+                    if (totalChapters === 0) {
+                        const totalMatch = receivedText.match(/共\s*(\d+)\s*章/);
+                        if (totalMatch) {
+                            totalChapters = parseInt(totalMatch[1], 10);
+                        }
+                    }
+
+                    // 2. 尋找最後一個出現的「=== 第 X 章：xxxx ===」或「=== 章節名稱 ===」
+                    // 根據後端 server.js 的寫法，會寫入 `=== ${ch.title} ===`
+                    const chapterMatches = [...receivedText.matchAll(/===\s*([^\n=]+)\s*===/g)];
+                    if (chapterMatches.length > 0) {
+                        // 拿到最新（最後面）的那一個章節標題
+                        const lastMatch = chapterMatches[chapterMatches.length - 1][1];
+                        // 過濾掉開頭的「小說打包開始...」
+                        if (!lastMatch.includes('小說打包開始')) {
+                            currentChapterTitle = lastMatch.trim();
+                        }
+                    }
+
+                    // 3. 計算目前抓到第幾章
+                    // 扣掉開頭和結尾的特殊標記，用出現的章節大括號數量來算進度數
+                    const currentChapterCount = chapterMatches.filter(m => !m[1].includes('小說打包開始') && !m[1].includes('全書打包完成')).length;
+
+                    // 4. 更新 UI 畫面
+                    let progressText = `📥 正在下載各章節，請稍候...\n`;
+                    if (totalChapters > 0) {
+                        progressText += `進度：${currentChapterCount} / ${totalChapters}\n`;
+                    }
+                    progressText += `目前正在打包：${currentChapterTitle}`;
+                    
+                    showStatus(progressText, 'loading');
+                }
+
+                // 當讀取完畢（done === true），將所有 chunks 融合成一個大 Blob
+                const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
+
+                // 解析檔名邏輯
                 const disposition = response.headers.get('Content-Disposition');
                 let filename = 'novel_download.txt';
-                if (disposition && disposition.indexOf('attachment') !== -1) {
-                    const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-                    const matches = filenameRegex.exec(disposition);
-                    if (matches != null && matches[1]) { 
-                        filename = decodeURIComponent(matches[1].replace(/['"]/g, ''));
+                if (disposition) {
+                    const filenameStarRegex = /filename\*=UTF-8''([^;\n]+)/i;
+                    const filenameRegex = /filename="?([^;\n"\b]+)"?/i;
+                    let matches = filenameStarRegex.exec(disposition);
+                    if (matches && matches[1]) {
+                        filename = decodeURIComponent(matches[1]);
+                    } else {
+                        matches = filenameRegex.exec(disposition);
+                        if (matches && matches[1]) {
+                            filename = decodeURIComponent(matches[1]);
+                        }
                     }
                 }
 
-                // 核心：在瀏覽器記憶體中建立一個暫時的下載連結，並模擬點擊來觸發手機/電腦下載
+                // 觸發瀏覽器下載
                 const downloadUrl = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = downloadUrl;
                 a.download = filename;
                 document.body.appendChild(a);
-                a.click(); // 觸發下載
+                a.click();
                 
-                // 清理記憶體與元素
                 document.body.removeChild(a);
                 window.URL.revokeObjectURL(downloadUrl);
 
-                showStatus('下載完成！文檔已儲存至您的裝置。', 'success');
+                showStatus('🎉 下載完成！文檔已儲存至您的裝置。', 'success');
             } catch (error) {
                 console.error(error);
-                showStatus('下載失敗：' + error.message, 'error');
+                if (error.name === 'AbortError') {
+                    showStatus('🛑 已由使用者手動停止下載。', 'error');
+                } else {
+                    showStatus('❌ 下載失敗：' + error.message, 'error');
+                }
             } finally {
                 // 恢復按鈕狀態
                 startBtn.disabled = false;
+                stopBtn.style.display = 'none'; // 隱藏停止按鈕
             }
         });
 
-        // 💡 檢查這裡：確保這裡「沒有」任何 </style> 標籤！直接就是 function 開始
+        // 停止按鈕點擊事件
+        stopBtn.addEventListener('click', () => {
+            if (abortController) {
+                abortController.abort(); // 觸發中斷，引發 AbortError
+            }
+        });
 
-        // 輔助函式：切換狀態提示文字與樣式
         function showStatus(text, type) {
             statusBox.innerText = text;
-            statusBox.className = 'status-message'; // 先重設樣式
+            statusBox.className = 'status-message'; 
             if (type === 'loading') statusBox.classList.add('status-loading');
             if (type === 'success') statusBox.classList.add('status-success');
             if (type === 'error') statusBox.classList.add('status-error');
