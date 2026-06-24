@@ -24,6 +24,13 @@ app.post('/download', async (req, res) => {
 
     console.log(`🚀 收到打包請求，目標網址: ${targetUrl}`);
 
+    // 💡 建立一個變數，用來記錄前端是否已經斷開連線
+    let isClientConnected = true;
+    res.on('close', () => {
+        console.log('🛑 偵測到用戶端切斷連線（可能按了停止或關閉網頁）');
+        isClientConnected = false;
+    });
+
     try {
         // === 【步驟 A：抓取目錄頁並找到真正的章節連結】 ===
         const mainResponse = await axios.get(targetUrl, {
@@ -33,7 +40,6 @@ app.post('/download', async (req, res) => {
         const mainDom = new JSDOM(mainResponse.data);
         const doc = mainDom.window.document;
 
-        // 🌟 使用你原本定義的精準目錄箱子名字
         const links = doc.querySelectorAll('.chapter-list li a');
         let chapters = [];
 
@@ -71,16 +77,22 @@ app.post('/download', async (req, res) => {
 
         console.log(`🔍 總共找到 ${chapters.length} 個章節，開始逐步串流下載...`);
 
-        // 🔥 【重要改動】在這裡提早發送 Headers，啟用分塊串流機制，防止 Render 30 秒超時
+        // 提早發送 Headers
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename="novel_download.txt"');
         res.setHeader('Transfer-Encoding', 'chunked'); 
 
-        // 先寫入小說開頭訊息
         res.write(`=== 小說打包開始 (共 ${chapters.length} 章) ===\n\n`);
 
-        // === 【步驟 B：一章一章下載內文，並即時回傳給前端】 ===
+        // === 【步驟 B：一章一章下載內文】 ===
         for (let i = 0; i < chapters.length; i++) {
+            
+            // 🔥 【核心防線】在每章爬取前，先檢查前端是否還在線。如果已經斷線，立刻終止 for 迴圈！
+            if (!isClientConnected) {
+                console.log(`跳出迴圈：停止在第 ${i + 1} 章，不再繼續爬取。`);
+                break;
+            }
+
             const ch = chapters[i];
             console.log(`正在下載並串流 (${i + 1}/${chapters.length}): ${ch.title}`);
 
@@ -92,7 +104,6 @@ app.post('/download', async (req, res) => {
                 const chDom = new JSDOM(chResponse.data);
                 const chDoc = chDom.window.document;
 
-                // 🌟 使用你原本定義的內文箱子
                 const articleBody = chDoc.querySelector('.chapter-detail .content');
                 
                 let pureText = '';
@@ -102,7 +113,6 @@ app.post('/download', async (req, res) => {
                     pureText = `（系統回報：這一個章節的網頁骨架裡，找不到指定的內文箱子。）`;
                 }
 
-                // 🔥 改動：不再累加到大變數，而是直接 res.write 吐給前端
                 res.write(`\n\n=== ${ch.title} ===\n\n${pureText}\n`);
 
             } catch (error) {
@@ -110,22 +120,22 @@ app.post('/download', async (req, res) => {
                 res.write(`\n\n=== ${ch.title} ===\n\n[這一章下載失敗了，原因：${error.message}]\n`);
             }
 
-            // 休息 1.5 秒，當個有禮貌的乖寶寶
             await delay(1500);
         }
 
-        // === 【步驟 C：全部章節傳送完畢，正式關閉連線】 ===
-        console.log('🎁 所有章節串流完畢，通知裝置封包下載！');
-        res.write(`\n\n=== 全書打包完成 ===\n`);
-        res.end(); 
+        // === 【步驟 C：正式關閉連線】 ===
+        // 只有在連線還活著的時候才呼叫 res.end()
+        if (isClientConnected) {
+            console.log('🎁 所有章節串流完畢，通知裝置封包下載！');
+            res.write(`\n\n=== 全書打包完成 ===\n`);
+            res.end(); 
+        }
 
     } catch (error) {
         console.error('後端發生錯誤:', error.message);
-        // 如果在還沒發送 Headers 前就崩潰，才可以用 JSON 回傳錯誤
         if (!res.headersSent) {
             res.status(500).json({ error: '伺服器內部錯誤: ' + error.message });
         } else {
-            // 如果下載到一半出錯，直接中斷連線
             res.end();
         }
     }
