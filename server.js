@@ -34,7 +34,9 @@ app.post('/download', async (req, res) => {
     try {
         // === 【步驟 A：抓取目錄頁並找到真正的章節連結】 ===
         const mainResponse = await axios.get(targetUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 
+            }
         });
         
         const mainDom = new JSDOM(mainResponse.data);
@@ -98,7 +100,13 @@ app.post('/download', async (req, res) => {
 
             try {
                 const chResponse = await axios.get(ch.url, {
-                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+                    headers: { 
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                        'Referer': targetUrl // 告訴對方我們是從目錄頁點進來的，完美防禦盜鏈判定
+                    },
+                    timeout: 10000 // 給予 10 秒寬容超時時間
                 });
                 
                 const chDom = new JSDOM(chResponse.data);
@@ -118,8 +126,15 @@ app.post('/download', async (req, res) => {
             } catch (error) {
                 console.error(`下載 ${ch.title} 失敗:`, error.message);
                 res.write(`\n\n=== ${ch.title} ===\n\n[這一章下載失敗了，原因：${error.message}]\n`);
+                
+                // 萬一不幸遇到 429 頻率限制，多罰站 5 秒鐘
+                if (error.response && error.response.status === 429) {
+                    console.log('⚠️ 偵測到 429 頻率限制，多休息 5 秒...');
+                    await delay(5000);
+                }
             }
 
+            // 💡 固定每章休息 1.5 秒，細水長流最安全
             await delay(1500);
         }
 
